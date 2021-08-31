@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
-""" python3 enableDetective.py --master_account 555555555555 --assume_role detectiveAdmin --enabled_regions us-east-1,us-east-2,us-west-2,ap-northeast-1,eu-west-1 --input_file accounts.csv
+""" python3 enableDetective.py --master_account 555555555555 --assume_role detectiveAdmin --enabled_regions us-east-1,us-east-2,us-west-2,ap-northeast-1,eu-west-1 --input_file accounts.csv --organization
 """
 __author__ = "Ryan Nolette"
 __copyright__ = "Amazon 2020"
@@ -55,10 +55,15 @@ def setup_command_line(args = None) -> argparse.Namespace:
     parser.add_argument('--master_account', type=_master_account_type,
                         required=True,
                         help="AccountId for Central AWS Account.")
-    parser.add_argument('--input_file', type=argparse.FileType('r'),
-                        required=True,
+
+    account_input = parser.add_mutually_exclusive_group(required=True)
+    account_input.add_argument('--input_file', type=argparse.FileType('r'),
                         help=('Path to CSV file containing the list of '
                               'account IDs and Email addresses.'))
+    account_input.add_argument('--organization', action='store_true',
+                        help=('Reads the list of accounts from the master account\'s '
+                              'organization.'))
+
     parser.add_argument('--assume_role', type=str, required=True,
                         help="Role Name to assume in each account.")
     parser.add_argument('--enabled_regions', type=str,
@@ -79,9 +84,6 @@ def setup_command_line(args = None) -> argparse.Namespace:
 def read_accounts_csv(input_file: typing.IO) -> typing.Dict:
     """
     Parses contents from the CSV file containing the accounts and email addreses.
-
-    Args:
-        input_file: A file object to read CSV data from.
 
     Returns:
         A dictionary where the key is account ID and value is email address.
@@ -104,6 +106,36 @@ def read_accounts_csv(input_file: typing.IO) -> typing.Dict:
 
         aws_account_dict[account_number.strip()] = email.strip()
 
+    return aws_account_dict
+
+
+def read_accounts_org(session: boto3.Session) -> typing.Dict:
+    """
+    Reads a list of accounts from the current account's organization.
+
+    Args:
+        session: boto3 session.
+
+    Returns:
+        A dictionary where the key is account ID and value is email address.
+    """
+    try:
+        # Get the list of accounts
+        org_client = session.client('organizations')
+        
+        accounts = []
+
+        response = org_client.list_accounts()
+        accounts += [response["Accounts"]]
+
+        while "NextToken" in response:
+            response = org_client.list_accounts(NextToken=response["NextToken"])
+            accounts += [response["Accounts"]]
+
+    except Exception as e:
+        logging.exception(f'exception when getting organization accounts: {e}')
+
+    aws_account_dict = {a["Id"]: a["Email"] for a in accounts}
     return aws_account_dict
 
 
@@ -194,7 +226,7 @@ def get_graphs(d_client: botocore.client.BaseClient) -> typing.List[str]:
 
 
 def get_members(d_client: botocore.client.BaseClient, graphs: typing.List[str]) ->\
-        (typing.Dict[str, typing.Set[str]], typing.Dict[str, typing.Set[str]]):
+        typing.Tuple[typing.Dict[str, typing.Set[str]], typing.Dict[str, typing.Set[str]]]:
     """
     Get member accounts for all behaviour graphs in a region.
 
@@ -259,7 +291,7 @@ def create_members(d_client: botocore.client.BaseClient, graph_arn: str, disable
         Set with the IDs of the successfully created accounts.
     """
     try:
-        # I'm calculating set difference: the elements that are present in the CSV and that are not
+        # I'm calculating set difference: the elements that are present in the account list and not
         # present in the account_ids set.
         set_difference = account_csv.keys() - account_ids
         if not set_difference:
@@ -329,7 +361,6 @@ def chunked(it, size):
         
 if __name__ == '__main__':
     args = setup_command_line()
-    aws_account_dict = read_accounts_csv(args.input_file)
 
     try:
         session = boto3.session.Session()
@@ -348,7 +379,13 @@ if __name__ == '__main__':
         # In this case the traceback adds LOTS of value.
         logging.exception(f'error creating session {e.args}')
 
-    #Chunk the list of accounts in the .csv into batches of 50 due to the API limitation of 50 accounts per invokation
+    #Build list of accounts
+    if args.organization == True:
+        aws_account_dict = read_accounts_org(session=master_session)
+    else:
+        aws_account_dict = read_accounts_csv(args.input_file)
+
+    #Chunk the list of accounts into batches of 50 due to the API limitation of 50 accounts per invokation
     for chunk_tuple in chunked(aws_account_dict.items(), 50):
         chunk = {x: y for x, y in chunk_tuple}
 
